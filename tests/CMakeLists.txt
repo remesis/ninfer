@@ -1,5 +1,17 @@
 find_package(Python3 REQUIRED COMPONENTS Interpreter)
 
+add_executable(ninfer_ngram_proposer_test targets/qwen3_6/test_ngram_proposer.cpp)
+target_include_directories(ninfer_ngram_proposer_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
+add_test(NAME ninfer_ngram_proposer_test COMMAND ninfer_ngram_proposer_test)
+add_executable(ninfer_ngram_archive_test targets/qwen3_6/test_ngram_archive.cpp
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/impl/runtime/ngram_archive.cpp)
+target_include_directories(ninfer_ngram_archive_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src ${PROJECT_SOURCE_DIR}/include
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
+add_test(NAME ninfer_ngram_archive_test COMMAND ninfer_ngram_archive_test)
+
 # This target deliberately receives no src/, CUDA, artifact, kernel, or target
 # include root. It proves that the installed product headers stand alone.
 add_executable(ninfer_public_api_test test_public_api.cpp)
@@ -122,6 +134,14 @@ ninfer_add_test(ninfer_qwen3_6_runtime_mechanisms_test
   LIBRARIES ninfer_engine ninfer_core)
 target_include_directories(ninfer_qwen3_6_runtime_mechanisms_test PRIVATE
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export)
+ninfer_add_test(ninfer_ngram_graph_planning_test
+  SOURCES targets/qwen3_6/test_ngram_graph_planning.cpp
+  LIBRARIES ninfer_engine)
+target_include_directories(ninfer_ngram_graph_planning_test PRIVATE
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_27b/export
+  ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_35b_a3b/export)
+target_link_libraries(ninfer_ngram_graph_planning_test PRIVATE CUDA::cudart)
 ninfer_add_test(ninfer_qwen3_6_state_image_test
   SOURCES targets/qwen3_6/test_state_image.cpp
   LIBRARIES ninfer_engine ninfer_core)
@@ -151,6 +171,22 @@ ninfer_add_test(ninfer_qwen3_8_27b_dflash2_real_test
   SOURCES targets/qwen3_6_27b/test_engine_dflash2_real.cpp
   LIBRARIES ninfer_engine)
 set_tests_properties(ninfer_qwen3_8_27b_dflash2_real_test PROPERTIES SKIP_RETURN_CODE 77)
+ninfer_add_test(ninfer_ngram_lifecycle_real
+  SOURCES targets/qwen3_6/test_ngram_lifecycle_real.cpp
+  LIBRARIES ninfer_engine)
+set_tests_properties(ninfer_ngram_lifecycle_real PROPERTIES SKIP_RETURN_CODE 77)
+ninfer_add_test(ninfer_ngram_archive_real
+  SOURCES targets/qwen3_6/test_ngram_archive_real.cpp
+  LIBRARIES ninfer_engine)
+set_tests_properties(ninfer_ngram_archive_real PROPERTIES SKIP_RETURN_CODE 77)
+ninfer_add_test(ninfer_ngram_thinking_real
+  SOURCES targets/qwen3_6/test_ngram_thinking_real.cpp
+  LIBRARIES ninfer_engine)
+set_tests_properties(ninfer_ngram_thinking_real PROPERTIES SKIP_RETURN_CODE 77)
+ninfer_add_test(ninfer_ngram_stop_chat_real
+  SOURCES targets/qwen3_6/test_ngram_stop_chat_real.cpp
+  LIBRARIES ninfer_engine)
+set_tests_properties(ninfer_ngram_stop_chat_real PROPERTIES SKIP_RETURN_CODE 77)
 ninfer_add_test(ninfer_qwen3_6_27b_load_plan_test
   SOURCES targets/qwen3_6_27b/test_load_plan.cpp
   NEEDS_SOURCE_DIR
@@ -160,6 +196,11 @@ target_include_directories(ninfer_qwen3_6_27b_load_plan_test PRIVATE
   ${PROJECT_SOURCE_DIR}/src/targets/qwen3_6_27b/export)
 target_link_libraries(ninfer_qwen3_6_27b_load_plan_test PRIVATE CUDA::cudart)
 set_tests_properties(ninfer_qwen3_6_27b_load_plan_test PROPERTIES SKIP_RETURN_CODE 77)
+foreach(check planning qwen38-old-groupwise qwen38-old-nvfp4 qwen38-groupwise-dflash2 qwen38-nvfp4-dflash2)
+  add_test(NAME ninfer_qwen27b_load_plan_${check}
+    COMMAND ninfer_qwen3_6_27b_load_plan_test --${check})
+  set_tests_properties(ninfer_qwen27b_load_plan_${check} PROPERTIES SKIP_RETURN_CODE 77)
+endforeach()
 ninfer_add_test(ninfer_qwen3_6_35b_a3b_real_test
   SOURCES targets/qwen3_6_35b_a3b/test_engine_real.cpp
   LIBRARIES ninfer_engine)
@@ -283,6 +324,10 @@ add_test(NAME ninfer_softmax_attention_nvfp4_test
   COMMAND ninfer_softmax_attention_test --nvfp4-only)
 add_test(NAME ninfer_softmax_attention_k8v4_test
   COMMAND ninfer_softmax_attention_test --k8v4-only)
+add_test(NAME ninfer_softmax_attention_wide_test
+  COMMAND ninfer_softmax_attention_test --wide-only)
+set_tests_properties(ninfer_softmax_attention_wide_test
+  PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 1800 RUN_SERIAL TRUE)
 set_tests_properties(
   ninfer_softmax_attention_nvfp4_test
   ninfer_softmax_attention_k8v4_test
@@ -313,6 +358,10 @@ ninfer_add_op_test(ninfer_prepare_masked_block_test
 ninfer_add_op_test(ninfer_sparse_moe_test
   SOURCES ops/test_sparse_moe.cpp
   LIBRARIES ninfer_ops)
+add_test(NAME ninfer_sparse_moe_wide_test
+  COMMAND ninfer_sparse_moe_test --wide-only)
+set_tests_properties(ninfer_sparse_moe_wide_test
+  PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600 RUN_SERIAL TRUE)
 ninfer_add_op_test(ninfer_mtp_pack_test
   SOURCES ops/test_mtp_pack.cpp
   LIBRARIES ninfer_ops)
@@ -322,6 +371,15 @@ ninfer_add_op_test(ninfer_mtp_round_test
 ninfer_add_op_test(ninfer_speculative_round_test
   SOURCES ops/test_speculative_round.cpp
   LIBRARIES ninfer_ops)
+foreach(mode IN ITEMS ngram-only onehot-distribution mtp-onehot mtp-distribution ngram-negative-penalties wide-accept wide-distribution)
+  string(REPLACE "-" "_" test_suffix "${mode}")
+  add_test(NAME ninfer_speculative_${test_suffix}_test
+    COMMAND ninfer_speculative_round_test --${mode})
+  set_tests_properties(ninfer_speculative_${test_suffix}_test
+    PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 240)
+endforeach()
+set_tests_properties(ninfer_speculative_wide_accept_test PROPERTIES TIMEOUT 600)
+set_tests_properties(ninfer_speculative_wide_distribution_test PROPERTIES TIMEOUT 900 RUN_SERIAL TRUE)
 ninfer_add_linear_test(ninfer_linear_q4_a16_test ops/linear/test_q4_a16.cpp)
 ninfer_add_linear_test(ninfer_linear_q5_a16_test ops/linear/test_q5_a16.cpp)
 ninfer_add_linear_test(ninfer_linear_q6_a16_test ops/linear/test_q6_a16.cpp)
@@ -357,6 +415,10 @@ ninfer_add_op_test(ninfer_gated_delta_net_replay_record_test
 ninfer_add_op_test(ninfer_gdn_replay_fold_test
   SOURCES ops/test_gdn_replay_fold.cpp
   LIBRARIES ninfer_ops)
+add_test(NAME ninfer_gdn_replay_fold_wide_test
+  COMMAND ninfer_gdn_replay_fold_test --wide-only)
+set_tests_properties(ninfer_gdn_replay_fold_wide_test
+  PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600 RUN_SERIAL TRUE)
 ninfer_add_fused_linear_test(
   ninfer_linear_add_q5_a16_test
   ops/linear_add/test_q5_a16.cpp
@@ -375,6 +437,10 @@ ninfer_add_op_test(ninfer_linear_add_nvfp4_test
 ninfer_add_op_test(ninfer_linear_add_fp8_test
   SOURCES ops/linear_add/test_fp8.cpp
   LIBRARIES ninfer_ops)
+add_test(NAME ninfer_linear_add_fp8_wide_test
+  COMMAND ninfer_linear_add_fp8_test --wide-only)
+set_tests_properties(ninfer_linear_add_fp8_wide_test
+  PROPERTIES SKIP_RETURN_CODE 77 TIMEOUT 600 RUN_SERIAL TRUE)
 ninfer_add_fused_linear_test(
   ninfer_linear_pair_w8_a16_test
   ops/linear_pair/test_w8_a16.cpp

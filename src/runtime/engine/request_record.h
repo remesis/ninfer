@@ -155,6 +155,8 @@ struct RequestRecord {
     const std::uint64_t id;
     const std::uint64_t publication_order;
     PreparedPrompt prompt;
+    std::unique_ptr<typename Package::NgramArchive::Request> ngram_archive;
+    bool ngram_admission_checked = false;
     OutputSession output;
     PromptSummary prompt_summary;
     double prepare_seconds = 0.0;

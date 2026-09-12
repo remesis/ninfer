@@ -618,8 +618,10 @@ int run_profile(const CodecProfile& profile) {
                                   profile.routed_gate_up, profile.routed_down, tokens, tokens));
         // Decode starts with the exact top-8 boundary tie; multi-token cases cycle the tie,
         // high/low expert ids, and a different ordering of the same experts.
-        failures +=
-            fixture.run(tokens, index == 0 ? 1 : 0, profile.verify_graph_replay && index == 1);
+        failures += fixture.run(tokens, index == 0 ? 1 : 0,
+                                profile.verify_graph_replay &&
+                                    (tokens == 2 || tokens == 4 || tokens == 6 || tokens == 8 ||
+                                     tokens == 16 || tokens == 32 || tokens == 64));
     }
     const std::size_t interval = ops::sparse_moe_workspace_capacity_bytes(
         profile.routed_gate_up, profile.routed_down, 1, profile.token_cases.back());
@@ -633,7 +635,12 @@ int run_profile(const CodecProfile& profile) {
 
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    const bool wide_only = argc == 2 && std::string_view(argv[1]) == "--wide-only";
+    if (argc != 1 && !wide_only) {
+        std::cerr << "usage: " << argv[0] << " [--wide-only]\n";
+        return 2;
+    }
     if (cuda_unavailable()) {
         std::cout << "SKIP: no usable CUDA device\n";
         return 77;
@@ -642,14 +649,24 @@ int main() {
     // These are public-behavior cases, not route assertions. They exercise decode (T=1), the
     // Small-T supported-domain edges, each profile's first prefill T, the wide-prefill boundary,
     // and one call crossing the 4096-token internal slice without observing any private plan.
-    constexpr std::array<std::int32_t, 6> kQ4Q5Tokens{{1, 2, 46, 47, 768, 4097}};
-    constexpr std::array<std::int32_t, 5> kQ4Q6Tokens{{1, 2, 46, 47, 768}};
-    constexpr std::array<std::int32_t, 5> kW8W8Tokens{{1, 2, 19, 20, 768}};
-    const std::array<CodecProfile, 3> profiles{{
+    constexpr std::array<std::int32_t, 40> kQ4Q5Tokens{
+        {1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16, 17, 18, 19,  20,
+         21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 46, 47, 48, 63, 64, 768, 4097}};
+    constexpr std::array<std::int32_t, 39> kQ4Q6Tokens{
+        {1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16, 17, 18, 19, 20,
+         21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 46, 47, 48, 63, 64, 768}};
+    constexpr std::array<std::int32_t, 37> kW8W8Tokens{
+        {1,  2,  3,  4,  5,  6,  7,  8,  9,  10, 11, 12, 13, 14, 15, 16, 17, 18, 19,
+         20, 21, 22, 23, 24, 25, 26, 27, 28, 29, 30, 31, 32, 33, 48, 63, 64, 768}};
+    constexpr std::array<std::int32_t, 6> kWideTokens{{32, 33, 47, 48, 63, 64}};
+    std::array<CodecProfile, 3> profiles{{
         {"sparse_moe q4+q5 a16", QType::Q4G64_F16S, QType::Q5G64_F16S, kQ4Q5Tokens, true},
-        {"sparse_moe q4+q6 a16", QType::Q4G64_F16S, QType::Q6G64_F16S, kQ4Q6Tokens, false},
-        {"sparse_moe w8+w8 a16", QType::W8G32_F16S, QType::W8G32_F16S, kW8W8Tokens, false},
+        {"sparse_moe q4+q6 a16", QType::Q4G64_F16S, QType::Q6G64_F16S, kQ4Q6Tokens, true},
+        {"sparse_moe w8+w8 a16", QType::W8G32_F16S, QType::W8G32_F16S, kW8W8Tokens, true},
     }};
+    if (wide_only) {
+        for (CodecProfile& profile : profiles) { profile.token_cases = kWideTokens; }
+    }
 
     int failures = 0;
     for (const CodecProfile& profile : profiles) { failures += run_profile(profile); }

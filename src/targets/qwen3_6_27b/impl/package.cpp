@@ -117,14 +117,17 @@ Package::construct_loaded_model(LoadPlan&& plan, artifact::MaterializedArtifact&
 
 Package::Frontend Package::make_frontend(const LoadedModel& model, const EngineOptions& options) {
     if (model.impl_ == nullptr) { throw std::invalid_argument("loaded model is empty"); }
-    return qwen3_6::make_frontend(model.impl_->data.frontend,
-                                  qwen3_6::FrontendOptions{
-                                      .vision_enabled = model.impl_->data.runtime.features.vision,
-                                      .max_context    = options.max_context,
-                                      .media_cache_bytes        = options.media_cache_bytes,
-                                      .media_live_bytes         = options.media_live_bytes,
-                                      .media_preprocess_threads = options.media_preprocess_threads,
-                                  });
+    return qwen3_6::make_frontend(
+        model.impl_->data.frontend,
+        qwen3_6::FrontendOptions{
+            .vision_enabled           = model.impl_->data.runtime.features.vision,
+            .max_context              = options.max_context,
+            .media_cache_bytes        = options.media_cache_bytes,
+            .media_live_bytes         = options.media_live_bytes,
+            .media_preprocess_threads = options.media_preprocess_threads,
+            .ngram_sources_enabled    = options.speculative.ngram_draft_tokens != 0,
+            .ngram_archive_enabled    = options.speculative.ngram_archive_bytes != 0,
+        });
 }
 
 Package::SequencePlanner Package::make_sequence_planner(DeviceContext& device,

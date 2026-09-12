@@ -591,6 +591,25 @@ int workspace_route_boundary_contract() {
     return failures;
 }
 
+int wide_workspace_rng_contract() {
+    std::vector<float> column(257, -100.0f);
+    for (int i = 0; i < 4; ++i) { column[i] = static_cast<float>(i) * 0.25f; }
+    ops::SamplingConfig config;
+    config.temperature = 1.0f;
+    config.top_k       = 4;
+    config.seed        = 424242;
+    int failures       = 0;
+    for (int width : {16, 17, 31, 32, 33}) {
+        const auto single =
+            run_repeated(column, 257, width * 2, 1, config, 100, ops::kSamplePurposeDecode);
+        const auto wide =
+            run_repeated(column, 257, width * 2, width, config, 100, ops::kSamplePurposeDecode);
+        failures += single.integrity_failures + wide.integrity_failures;
+        failures += verify_exact("wide sampler preserves counter keys", wide.tokens, single.tokens);
+    }
+    return failures;
+}
+
 int increment_counts_contract() {
     const std::vector<std::int32_t> ids{1, 3, 1, 7};
     const std::vector<std::int32_t> initial{0, 2, 0, 4, 0, 0, 0, 1};
@@ -622,9 +641,10 @@ int main() {
 
     int failures            = 0;
     const std::size_t at_16 = ops::sampling_workspace_capacity_bytes(257, 16, 16);
-    if (ops::sampling_workspace_capacity_bytes(256, 1, 16) != 0 || at_16 == 0 ||
-        ops::sampling_workspace_capacity_bytes(257, 17, 17) != 0 ||
-        ops::sampling_workspace_capacity_bytes(257, 1, 17) != at_16) {
+    const std::size_t at_32 = ops::sampling_workspace_capacity_bytes(257, 32, 32);
+    if (ops::sampling_workspace_capacity_bytes(256, 1, 16) != 0 || at_16 == 0 || at_32 <= at_16 ||
+        ops::sampling_workspace_capacity_bytes(257, 33, 33) != 0 ||
+        ops::sampling_workspace_capacity_bytes(257, 1, 33) != at_32) {
         std::cerr << "sampling workspace route boundary contract failed\n";
         ++failures;
     }
@@ -641,6 +661,7 @@ int main() {
     failures += real_shape_distribution_contract();
     failures += rng_key_contract();
     failures += workspace_route_boundary_contract();
+    failures += wide_workspace_rng_contract();
     failures += increment_counts_contract();
 
     std::cout << (failures == 0 ? "OK" : "FAIL") << " sample public contract\n";

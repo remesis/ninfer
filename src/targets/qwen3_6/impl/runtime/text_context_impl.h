@@ -170,6 +170,9 @@ void DFlashFeatureSink::capture_layer(int layer, const Tensor& value, cudaStream
         Tensor source = value.view({value.ne[0], batch_width, batch_size});
         Tensor target =
             batch_features->slice(0, static_cast<std::int32_t>(index) * value.ne[0], value.ne[0]);
+        if (batch_size == 1 && target.ne[1] != batch_width) {
+            target = target.slice(1, 0, batch_width);
+        }
         ops::scatter_bf16_batch(source, *batch_lanes, *batch_valid_columns, target, stream);
         captured_mask |= 1U << index;
         return;
@@ -699,7 +702,7 @@ void TextContext::target_verify_batch_impl(const Tensor& ids, const Tensor& cach
                                            Tap& tap) {
     const std::int32_t width = ids.ne[0];
     const std::int32_t batch = ids.ne[1];
-    if (width <= 0 || width > static_cast<std::int32_t>(kDFlashDecodeMaximumWidth) || batch <= 0 ||
+    if (width <= 0 || width > static_cast<std::int32_t>(kDFlashVerifyMaximumWidth) || batch <= 0 ||
         batch > static_cast<std::int32_t>(kMaximumConcurrency)) {
         throw std::invalid_argument("target verify batch shape is outside the supported domain");
     }
@@ -783,7 +786,7 @@ void TextContext::mtp_forward_decode_batch(const Tensor& ids, const Tensor& hidd
     if (batch_mtp_kv_ == nullptr) { throw std::runtime_error("MTP forward is not enabled"); }
     const std::int32_t width = ids.ne[0];
     const std::int32_t batch = ids.ne[1];
-    if (width <= 0 || width > static_cast<std::int32_t>(kMaximumMtpDraftTokens + 1) || batch <= 0 ||
+    if (width <= 0 || width > static_cast<std::int32_t>(kMtpVerifyMaximumWidth) || batch <= 0 ||
         batch > static_cast<std::int32_t>(kMaximumConcurrency)) {
         throw std::invalid_argument("MTP decode batch shape is outside the supported domain");
     }
@@ -874,7 +877,8 @@ void TextContext::attn_mix(const FullLayerW& w, Tensor& x, int fidx, Phase ph) {
     }
     ops::sigmoid_mul(gate, a, s);
 
-    Variant::attention_output_projection(a.view({kCfg.q_size, T}), *w.o_proj, x, ph, work_, s);
+    Variant::attention_output_projection(a.view({kCfg.q_size, T}), *w.o_proj, x, ph,
+                                         active_sequence_batch_, work_, s);
 }
 
 void TextContext::gdn_mix(const GdnLayerW& w, Tensor& x, int gidx, Phase ph) {
@@ -917,6 +921,10 @@ void TextContext::gdn_mix(const GdnLayerW& w, Tensor& x, int gidx, Phase ph) {
                 throw std::logic_error("Replay-record GDN has no record storage");
             }
             GdnReplayRecordLayer records = replay_records_->layer(gidx, active_sequence_batch_);
+            if (active_sequence_batch_ == 1 && records.conv.ne[1] != width) {
+                records.conv =
+                    Tensor(records.conv.data, records.conv.dtype, {records.conv.ne[0], width, 1});
+            }
             Variant::gdn_input_projection_record(
                 projection_input, *w.projection, *w.conv1d, conv_states, valid,
                 *active_linear_state_source_slots_, records.conv, query_output, key_output,
@@ -958,6 +966,12 @@ void TextContext::gdn_mix(const GdnLayerW& w, Tensor& x, int gidx, Phase ph) {
         const Tensor valid = active_valid_columns_ != nullptr ? *active_valid_columns_ : Tensor{};
         if (gdn_state_action_ == GdnStateAction::RecordForReplay) {
             GdnReplayRecordLayer records = replay_records_->layer(gidx, active_sequence_batch_);
+            if (active_sequence_batch_ == 1 && records.key.ne[2] != width) {
+                for (Tensor* tensor : {&records.key, &records.value, &records.gate}) {
+                    *tensor = Tensor(tensor->data, tensor->dtype,
+                                     {tensor->ne[0], tensor->ne[1], width, 1});
+                }
+            }
             ops::gated_delta_net_replay_record(q_batch, k_batch, v_batch, g_batch, beta_batch,
                                                kGdnScale, recurrent_states, valid,
                                                *active_linear_state_source_slots_, records.key,
@@ -982,7 +996,8 @@ void TextContext::gdn_mix(const GdnLayerW& w, Tensor& x, int gidx, Phase ph) {
         {kCfg.gdn_v_dim, kCfg.gdn_v_heads, T});
     ops::gated_rmsnorm(o, *w.gdn_norm, z, kCfg.rms_eps, on, s);
 
-    Variant::gdn_output_projection(on.view({kCfg.value_dim, T}), *w.out_proj, x, ph, work_, s);
+    Variant::gdn_output_projection(on.view({kCfg.value_dim, T}), *w.out_proj, x, ph,
+                                   active_sequence_batch_, work_, s);
 }
 
 ops::SparseMoeHints TextContext::next_projection_hints(int layer) const {
@@ -1005,7 +1020,7 @@ void TextContext::mlp_tail(const Tensor* post_norm, const MlpW& m, Tensor& x, Ph
     Tensor h       = workspace_recipe::post_mixer_hidden<TextConfig>(work_, T);
     ops::rmsnorm(x, *post_norm, kCfg.rms_eps, true, h, s);
 
-    Variant::post_mixer(h, *m.payload, x, ph, hints, work_, s);
+    Variant::post_mixer(h, *m.payload, x, ph, active_sequence_batch_, hints, work_, s);
 }
 
 template <class Tap>

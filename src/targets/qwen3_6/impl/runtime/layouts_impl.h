@@ -254,6 +254,8 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
     const auto drafts = static_cast<std::int32_t>(plan.draft_window);
     const auto verify = drafts + 1;
     const ops::CausalAttentionExecutionEnvelope text_envelope{1, plan.capacity};
+    const ops::CausalAttentionExecutionEnvelope verify_envelope{1, plan.capacity,
+                                                                plan.ngram_draft_window > 15};
 
     const auto matrix  = [](WorkspaceLayoutBuilder& layout, DType dtype, std::int32_t rows,
                            std::int32_t tokens) { (void)layout.alloc(dtype, {rows, tokens}); };
@@ -436,7 +438,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
         out.mtp_prefill = finish(mtp_prefill);
 
         WorkspaceLayoutBuilder mtp_batch;
-        mtp_full_call(mtp_batch, verify, text_envelope, false);
+        mtp_full_call(mtp_batch, verify, verify_envelope, false);
         WorkspaceLayoutBuilder mtp_ar;
         mtp_full_call(mtp_ar, 1, text_envelope, true);
         WorkspaceLayoutBuilder mtp_align;
@@ -454,7 +456,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
             WorkspaceLayoutBuilder target;
             matrix(target, DType::BF16, TextConfig::hidden, aggregate);
             target_body(target, aggregate, aggregate, qwen3_6::TextPhase::Verify,
-                        GdnWorkspacePath::ReplayRecord, batch, verify, verify, text_envelope);
+                        GdnWorkspacePath::ReplayRecord, batch, verify, verify, verify_envelope);
 
             const auto mtp_decode_core = [&](WorkspaceLayoutBuilder& layout, std::int32_t width) {
                 const std::int32_t tokens = batch * width;
@@ -467,7 +469,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 scratch(layout,
                         ops::causal_softmax_attention_workspace_capacity_bytes(
                             {TextConfig::head_dim, TextConfig::query_heads, TextConfig::kv_heads},
-                            plan.kv_storage, text_envelope, batch, width, width));
+                            plan.kv_storage, verify_envelope, batch, width, width));
                 (void)workspace_recipe::mtp_post_attention<TextConfig>(layout, tokens);
                 scratch(layout, Variant::mtp_post_mixer_workspace_capacity_bytes(tokens, tokens));
             };
@@ -515,6 +517,7 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
             const auto dflash_proposal_capacity = [&](std::int32_t width, std::int32_t batch) {
                 WorkspaceLayoutBuilder layout;
                 const std::int32_t tokens = width * batch;
+                const std::int32_t drafts = width - 1;
                 matrix(layout, DType::BF16, DFlashConfig::hidden, tokens);
                 if constexpr (DFlashConfig::coherent_selector) {
                     const auto prepare = [&] {
@@ -614,14 +617,15 @@ WorkspacePlan build_workspace_plan(const SequencePlanImpl& plan) {
                 WorkspaceLayoutBuilder target;
                 matrix(target, DType::BF16, TextConfig::hidden, aggregate);
                 target_body(target, aggregate, aggregate, qwen3_6::TextPhase::Verify,
-                            GdnWorkspacePath::ReplayRecord, batch, verify, verify, text_envelope);
+                            GdnWorkspacePath::ReplayRecord, batch, verify, verify, verify_envelope);
                 const std::size_t accept =
                     DFlashConfig::coherent_selector
                         ? ops::speculative_accept_sparse_drafts_workspace_capacity_bytes(
                               TextConfig::token_domain, {false}, drafts, drafts, batch, batch)
                         : ops::speculative_accept_greedy_drafts_workspace_capacity_bytes(
                               TextConfig::token_domain, drafts, drafts, batch, batch);
-                const std::size_t proposal = dflash_proposal_capacity(verify, batch);
+                const std::size_t proposal = dflash_proposal_capacity(
+                    static_cast<std::int32_t>(plan.neural_draft_window) + 1, batch);
                 out.dflash_round =
                     std::max({out.dflash_round, finish(target), accept,
                               dflash_context_capacity(verify, batch, true), proposal});
@@ -704,6 +708,15 @@ void validate_target_options(DeviceContext& device, const EngineOptions& options
     if (device.compute_capability() != 120) {
         throw std::invalid_argument("Qwen3.6 family runtime requires compute capability 12.0");
     }
+    if (options.speculative.ngram_draft_tokens != 0 &&
+        ((options.speculative.backend != SpeculativeBackend::DFlash2 &&
+          options.speculative.backend != SpeculativeBackend::DFlash &&
+          options.speculative.backend != SpeculativeBackend::Mtp) ||
+         options.max_concurrency != 1 || options.speculative.ngram_draft_tokens > 63 ||
+         options.speculative.ngram_min_match < 4 || options.speculative.ngram_min_match > 64)) {
+        throw std::invalid_argument(
+            "ngram requires MTP/DFlash/DFlash2, concurrency one, K1..63 and match 4..64");
+    }
 }
 
 std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlanningInputs& inputs,
@@ -721,6 +734,9 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
     impl->max_concurrency     = inputs.max_concurrency;
     impl->prefill_chunk       = inputs.prefill_chunk;
     impl->draft_window        = inputs.draft_window;
+    impl->neural_draft_window = inputs.neural_draft_window;
+    impl->ngram_draft_window  = inputs.ngram_draft_window;
+    impl->ngram_min_match     = inputs.ngram_min_match;
     impl->speculative_backend = inputs.speculative_backend;
     impl->proposal_head       = inputs.proposal_head;
     impl->features            = inputs.features;
@@ -739,36 +755,51 @@ std::unique_ptr<SequencePlanImpl> build_sequence_candidate(const SequencePlannin
             impl->graph_allowance_bytes = checked_mul(12ULL * kMiB, impl->max_concurrency,
                                                       "ordinary exact-b graph allowance");
         } else if (impl->speculative_backend == SpeculativeBackend::Mtp) {
-            const auto profiles = mtp_graph_profiles(impl->capacity, impl->draft_window);
-            const std::size_t per_batch_allowance = graph_topology_allowance(
-                profiles,
-                [&](GraphExecutionProfile profile) {
-                    const std::uint64_t final_visible = std::min<std::uint64_t>(
-                        impl->capacity,
-                        static_cast<std::uint64_t>(profile.max) + 2ULL * impl->draft_window);
-                    return (final_visible <= 4096 ? 12ULL : 82ULL) * kMiB;
-                },
-                "MTP graph allowance");
+            const auto family_allowance = [&](std::uint32_t drafts) {
+                const auto profiles =
+                    mtp_graph_profiles(impl->capacity, drafts, impl->neural_draft_window);
+                return graph_topology_allowance(
+                    profiles,
+                    [&](GraphExecutionProfile profile) {
+                        const std::uint64_t final_visible = std::min<std::uint64_t>(
+                            impl->capacity, static_cast<std::uint64_t>(profile.max) + drafts +
+                                                impl->neural_draft_window);
+                        return (final_visible <= 4096 ? 12ULL : 82ULL) * kMiB;
+                    },
+                    "MTP graph allowance");
+            };
+            std::size_t per_batch_allowance = family_allowance(impl->neural_draft_window);
+            if (impl->ngram_draft_window != 0) {
+                per_batch_allowance =
+                    checked_add(per_batch_allowance, family_allowance(impl->ngram_draft_window),
+                                "MTP ngram graph allowance");
+            }
             impl->graph_allowance_bytes = checked_mul(per_batch_allowance, impl->max_concurrency,
                                                       "MTP exact-b graph allowance");
         } else {
-            const auto class_allowance = [&](std::uint32_t batch_size) {
-                const auto profiles =
-                    dflash_graph_profiles(impl->capacity, impl->draft_window, batch_size);
+            const auto class_allowance = [&](std::uint32_t batch_size, std::uint32_t drafts) {
+                const auto profiles = dflash_graph_profiles(impl->capacity, drafts, batch_size);
                 return graph_topology_allowance(
                     profiles,
                     [&](GraphExecutionProfile profile) {
                         const std::uint64_t final_visible = std::min<std::uint64_t>(
                             impl->capacity,
-                            static_cast<std::uint64_t>(profile.max) + impl->draft_window + 1ULL);
+                            static_cast<std::uint64_t>(profile.max) + drafts + 1ULL);
                         return (final_visible <= 4096 ? 64ULL : 96ULL) * kMiB;
                     },
                     "DFlash graph allowance");
             };
             for (std::uint32_t batch_size = 1; batch_size <= impl->max_concurrency; ++batch_size) {
                 impl->graph_allowance_bytes =
-                    checked_add(impl->graph_allowance_bytes, class_allowance(batch_size),
+                    checked_add(impl->graph_allowance_bytes,
+                                class_allowance(batch_size, impl->neural_draft_window),
                                 "DFlash exact-b graph allowance");
+                if (impl->ngram_draft_window != 0) {
+                    impl->graph_allowance_bytes =
+                        checked_add(impl->graph_allowance_bytes,
+                                    class_allowance(batch_size, impl->ngram_draft_window),
+                                    "DFlash ngram graph allowance");
+                }
             }
         }
     }
@@ -786,11 +817,15 @@ make_sequence_planner_impl(DeviceContext& device, const EngineOptions& options,
                            WeightsProfile weights_profile) {
     validate_target_options(device, options);
     SequencePlanningInputs inputs{
+        .neural_draft_window = options.speculative.draft_tokens,
+        .ngram_draft_window  = options.speculative.ngram_draft_tokens,
+        .ngram_min_match     = options.speculative.ngram_min_match,
         .weights_profile     = weights_profile,
         .capacity            = options.max_context,
         .max_concurrency     = options.max_concurrency,
         .prefill_chunk       = std::min(options.prefill_chunk, options.max_context),
-        .draft_window        = options.speculative.draft_tokens,
+        .draft_window =
+            std::max(options.speculative.draft_tokens, options.speculative.ngram_draft_tokens),
         .speculative_backend = options.speculative.backend,
         .kv_storage          = options.kv_cache,
         .proposal_head       = options.speculative.proposal_head,

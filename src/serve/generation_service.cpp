@@ -304,6 +304,7 @@ PreparedRequest GenerationService::prepare_impl(const GenerationRequest& request
         resolve_prompt_semantics(request, options_, prompt_capabilities_);
     ninfer::RequestOptions request_options = to_request_options(
         request, options_, semantics, cache_participation == CacheParticipation::ReadWrite);
+    request_options.ngram_session       = request.ngram_session;
     prepared.enable_thinking            = semantics.enable_thinking;
     prepared.thinking_budget            = request_options.execution.thinking.budget;
     prepared.effective_reasoning_effort = semantics.effective_reasoning_effort;
@@ -444,6 +445,14 @@ GenerationOutcome GenerationService::run(PreparedRequest& prepared, const Stream
     outcome.metrics.speculative_draft_tokens    = result.speculative.drafted_tokens;
     outcome.metrics.speculative_accepted_tokens = result.speculative.accepted_tokens;
     outcome.metrics.speculative_fallback_steps  = result.speculative.fallback_steps;
+    outcome.metrics.ngram_rounds                 = result.speculative.ngram_rounds;
+    outcome.metrics.ngram_drafted_tokens         = result.speculative.ngram_drafted_tokens;
+    outcome.metrics.ngram_accepted_tokens        = result.speculative.ngram_accepted_tokens;
+    outcome.metrics.ngram_archive_rounds         = result.speculative.ngram_archive_rounds;
+    outcome.metrics.ngram_archive_drafted_tokens = result.speculative.ngram_archive_drafted_tokens;
+    outcome.metrics.ngram_archive_accepted_tokens =
+        result.speculative.ngram_archive_accepted_tokens;
+    outcome.metrics.ngram_archive = result.ngram_archive;
     outcome.metrics.speculative_accepted_per_position =
         std::move(result.speculative.accepted_per_position);
 

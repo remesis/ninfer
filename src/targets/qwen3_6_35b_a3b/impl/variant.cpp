@@ -46,9 +46,7 @@ std::vector<GraphExecutionProfile> dflash_base_profiles(std::uint32_t capacity,
     for (const std::uint32_t visible_end : {128U, 512U, 2048U, 4096U, 8198U, 16390U, 32768U}) {
         add_target_boundary(visible_end);
     }
-    if (draft_window >= 6 && draft_window <= 15) {
-        add_target_boundary(draft_window <= 11 ? 512U : 1024U);
-    }
+    if (draft_window >= 6) { add_target_boundary(draft_window <= 11 ? 512U : 1024U); }
     std::sort(ends.begin(), ends.end());
     ends.erase(std::unique(ends.begin(), ends.end()), ends.end());
     return graph_profiles_through(max_frontier, ends);
@@ -133,7 +131,7 @@ void Variant::attention_projection(const Tensor& hidden,
 }
 
 void Variant::attention_output_projection(const Tensor& attention, const Weight& weight,
-                                          Tensor& residual, qwen3_6::TextPhase,
+                                          Tensor& residual, qwen3_6::TextPhase, std::int32_t,
                                           WorkspaceArena& workspace, cudaStream_t stream) {
     ops::linear_add(attention, weight, residual, workspace, stream);
 }
@@ -200,7 +198,7 @@ void Variant::gdn_input_projection_record(const Tensor& hidden, const GdnProject
 }
 
 void Variant::gdn_output_projection(const Tensor& hidden, const Weight& weight, Tensor& residual,
-                                    qwen3_6::TextPhase, WorkspaceArena& workspace,
+                                    qwen3_6::TextPhase, std::int32_t, WorkspaceArena& workspace,
                                     cudaStream_t stream) {
     ops::linear_add(hidden, weight, residual, workspace, stream);
 }
@@ -215,8 +213,9 @@ void Variant::gdn_norm_control_projection(const Tensor& residual, const Tensor& 
 }
 
 void Variant::post_mixer(const Tensor& hidden, const PostMixerWeights& weights, Tensor& residual,
-                         qwen3_6::TextPhase, const ::ninfer::ops::SparseMoeHints& hints,
-                         WorkspaceArena& workspace, cudaStream_t stream) {
+                         qwen3_6::TextPhase, std::int32_t,
+                         const ::ninfer::ops::SparseMoeHints& hints, WorkspaceArena& workspace,
+                         cudaStream_t stream) {
     run_sparse_moe(hidden, weights.op, residual, hints, workspace, stream);
 }
 

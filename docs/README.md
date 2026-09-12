@@ -9,6 +9,7 @@ run the CLI or HTTP server.
 |---|---|
 | [CLI](cli.md) | text, chat-history, image/video input, output streams, sampling, MTP, and common runtime options |
 | [HTTP serving](serving.md) | OpenAI Responses/Chat Completions, Anthropic Messages, state, streaming, token counting, authentication, and tool calls |
+| [Ngram copy proposals](ngram.md) | optional single-request copy acceleration alongside MTP, DFlash or DFlash2 |
 | [Performance](performance.md) | RTX 5090 measurement coverage, per-model serving results, methodology, and publication rules |
 | [Perplexity](perplexity.md) | fixed-corpus and custom-text causal perplexity, comparison rules, progress, and reports |
 | [CLI examples](../examples/cli/) | committed text, multimodal, thinking, long-decode, and long-context inputs |

@@ -283,10 +283,26 @@ OperationalRecord render_request_done(const RequestLogContext& context,
     if (metrics.speculative_draft_tokens != 0) {
         const double acceptance = static_cast<double>(metrics.speculative_accepted_tokens) /
                                   static_cast<double>(metrics.speculative_draft_tokens);
-        out << " | " << product::speculative_backend_name(metrics.speculative_backend)
+        out << " | "
+            << (metrics.ngram_rounds != 0
+                    ? "mixed speculation"
+                    : product::speculative_backend_name(metrics.speculative_backend))
             << " accepted " << product::format_pretty_count(metrics.speculative_accepted_tokens)
             << '/' << product::format_pretty_count(metrics.speculative_draft_tokens) << " ("
             << product::format_pretty_percent(acceptance) << ')';
+    }
+    if (metrics.ngram_rounds != 0) {
+        out << " | ngram " << metrics.ngram_accepted_tokens << '/' << metrics.ngram_drafted_tokens
+            << " accepted, " << metrics.ngram_rounds << " rounds";
+    }
+    if (metrics.ngram_archive.enabled) {
+        out << " | archive " << (metrics.ngram_archive.bound ? "bound" : "unbound");
+        if (metrics.ngram_archive.bound) {
+            out << " " << metrics.ngram_archive_accepted_tokens << '/'
+                << metrics.ngram_archive_drafted_tokens << " accepted, gen "
+                << metrics.ngram_archive.generation << ", " << metrics.ngram_archive.sources
+                << " sources";
+        }
     }
     if (outcome.thinking.configured_budget) {
         out << " | thinking "

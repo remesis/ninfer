@@ -14,6 +14,7 @@
 #include "targets/qwen3_6/impl/runtime/dflash_context.h"
 #include "targets/qwen3_6/impl/runtime/host_kv_extent_store.h"
 #include "targets/qwen3_6/impl/runtime/logical_kv_store.h"
+#include "targets/qwen3_6/impl/runtime/ngram_proposer.h"
 #include "targets/qwen3_6/impl/runtime/state_image_store.h"
 #include "targets/qwen3_6/impl/runtime/prefix_identity.h"
 #include "targets/qwen3_6/impl/runtime/resource_projection.h"
@@ -458,6 +459,12 @@ struct SharedPrefixSlot {
 // Request/round control is not retained with a reusable SequenceState. A later concurrent Engine
 // gives every occupied request slot its own instance of this state.
 struct RequestControl {
+    std::unique_ptr<NgramProposer> ngram;
+    std::shared_ptr<const NgramSnapshot> ngram_snapshot;
+    std::uint64_t ngram_copy_source = 0;
+    std::uint32_t ngram_copy_offset = 0;
+    std::size_t ngram_copy_ledger   = 0;
+    std::size_t ngram_indexed       = 0;
     Lifecycle lifecycle = Lifecycle::Empty;
     PendingCandidate pending;
     ops::SamplingConfig sampling_host;
@@ -628,6 +635,9 @@ public:
     const std::uint32_t shared_prefix_capacity;
     const std::uint32_t prefill_chunk;
     const std::uint32_t draft_window;
+    const std::uint32_t neural_draft_window;
+    const std::uint32_t ngram_draft_window;
+    const std::uint32_t ngram_min_match;
     const SpeculativeBackend speculative_backend;
     const KvCacheStorage kv_storage;
     const ProposalHead proposal_head;
@@ -673,6 +683,7 @@ public:
     DecodeGraphFamily ordinary_graphs;
     DecodeGraphFamily mtp_graphs;
     DecodeGraphFamily dflash_graphs;
+    DecodeGraphFamily ngram_graphs;
 
     PinnedHostBuffer round_host;
     std::optional<PinnedHostBuffer> score_logprobs_host;
@@ -1213,6 +1224,8 @@ private:
                                        std::span<const std::uint32_t> counts);
     void validate_licensed_tokens(std::span<const TokenId> tokens) const;
     void mark_workspace_usage(std::size_t phase_bytes) noexcept;
+    [[nodiscard]] NgramProposer::Match propose_ngram(std::span<const std::uint32_t> lanes,
+                                                     std::span<const runtime::RoundBudget> budgets);
     [[nodiscard]] runtime::BatchedGeneratedRound
     decode_ordinary_batch(std::span<const std::uint32_t> lanes,
                           std::span<const runtime::RoundBudget> budgets,

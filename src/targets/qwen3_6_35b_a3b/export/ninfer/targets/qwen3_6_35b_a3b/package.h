@@ -84,6 +84,7 @@ struct Package {
     using LoadedModel                = detail::LoadedModel;
     using Frontend                   = detail::Frontend;
     using PreparedPrompt             = detail::PreparedPrompt;
+    using NgramArchive               = qwen3_6::NgramArchive;
     using OutputSession              = detail::OutputSession;
     using PublishedOutput            = detail::PublishedOutput;
     using SequencePlanner            = qwen3_6::SequencePlanner<detail::Variant>;

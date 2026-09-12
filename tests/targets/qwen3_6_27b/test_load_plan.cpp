@@ -14,6 +14,7 @@
 #include <iostream>
 #include <stdexcept>
 #include <string>
+#include <string_view>
 #include <variant>
 
 namespace {
@@ -21,6 +22,36 @@ namespace {
 using ninfer::artifact::NumericFormat;
 using ninfer::targets::qwen3_6_27b::Package;
 using namespace ninfer::targets::qwen3_6_27b::detail;
+
+int verify_wide_residual_precision() {
+    using ninfer::QType;
+    using ninfer::ops::LinearPolicy;
+    using ninfer::targets::qwen3_6::TextPhase;
+    for (const auto type : {QType::NVFP4, QType::FP8_E4M3FN_ROW_BF16S, QType::Q5G64_F16S}) {
+        ninfer::Weight weight;
+        weight.qtype = type;
+        for (const auto phase : {TextPhase::Prefill, TextPhase::Verify}) {
+            for (const int batch : {0, 1, 2, 4, 8}) {
+                for (const int columns :
+                     {1, 6, 16, 17, 21, 22, 24, 25, 31, 32, 33, 48, 63, 64, 65, 96}) {
+                    auto expected = type == QType::NVFP4                  ? LinearPolicy::AllowA4
+                                    : type == QType::FP8_E4M3FN_ROW_BF16S ? LinearPolicy::AllowA8
+                                                                          : LinearPolicy::A16Only;
+                    if (type == QType::FP8_E4M3FN_ROW_BF16S && phase == TextPhase::Verify &&
+                        batch == 1 && columns >= 17 && columns <= 64) {
+                        expected = LinearPolicy::A16Only;
+                    }
+                    if (Variant::residual_projection_policy(weight, phase, columns, batch) !=
+                        expected) {
+                        std::cerr << "residual precision escaped its single-request wide domain\n";
+                        return 1;
+                    }
+                }
+            }
+        }
+    }
+    return 0;
+}
 
 std::filesystem::path artifact_path(const char* environment, const char* filename) {
     if (const char* value = std::getenv(environment); value != nullptr && *value != '\0') {
@@ -327,9 +358,71 @@ int verify_vision_workspace_planning() {
     return 0;
 }
 
+int verify_ngram_graph_planning() {
+    ninfer::DeviceContext device(0);
+    constexpr std::size_t mib = 1ULL << 20;
+    for (const unsigned context : {32768U, 262144U}) {
+        for (const auto backend :
+             {ninfer::SpeculativeBackend::Mtp, ninfer::SpeculativeBackend::DFlash2}) {
+            const auto graph_bytes = [&](unsigned neural, unsigned ngram) {
+                std::array<std::size_t, 2> reservations{};
+                for (unsigned enabled = 0; enabled < 2; ++enabled) {
+                    ninfer::EngineOptions options;
+                    options.max_context   = context;
+                    options.kv_capacity   = ninfer::KvCapacityPolicy::explicit_capacity(context);
+                    options.prefill_chunk = 1024;
+                    options.kv_cache      = ninfer::KvCacheStorage::Nvfp4Group16;
+                    options.speculative.backend              = backend;
+                    options.speculative.draft_tokens         = neural;
+                    options.speculative.ngram_draft_tokens   = ngram;
+                    options.speculative.proposal_head        = ninfer::ProposalHead::Optimized;
+                    options.context_cache.device_state_slots = 1;
+                    options.use_cuda_graph                   = enabled != 0;
+                    auto planner     = Package::make_sequence_planner(device, options,
+                                                                      WeightsProfile::Qwen38Nvfp4);
+                    const auto pages = planner.capacity_curve().minimum_main_page_groups;
+                    reservations[enabled] =
+                        std::move(planner).finalize(pages).device_reservation_bytes();
+                }
+                if (reservations[1] <= reservations[0])
+                    throw std::runtime_error("missing graph allowance");
+                return reservations[1] - reservations[0];
+            };
+            const auto neural      = graph_bytes(5, 0);
+            const auto equal_width = graph_bytes(5, 5);
+            const auto mixed_width = graph_bytes(5, 15);
+            if (graph_bytes(5, 31) != mixed_width) {
+                std::cerr << "wide ngram family changed the reachable graph classes\n";
+                return 1;
+            }
+            if (equal_width != 2 * neural) {
+                std::cerr << "equal-width ngram family allowance is not independent\n";
+                return 1;
+            }
+            if (backend == ninfer::SpeculativeBackend::Mtp) {
+                // Neural graphs share one 82 MiB class. Wide verification owns 3 small
+                // 12 MiB classes and 2/3 large 82 MiB classes at these capacities.
+                const auto expected = (context == 32768 ? 282U : 364U) * mib;
+                if (mixed_width != expected) {
+                    std::cerr << "MTP mixed-width allowance is wrong: " << mixed_width << '\n';
+                    return 1;
+                }
+            } else if (mixed_width != neural + graph_bytes(15, 0)) {
+                std::cerr << "DFlash2 mixed-width allowance does not match its two families\n";
+                return 1;
+            }
+            std::cout << "graph planning backend=" << static_cast<unsigned>(backend)
+                      << " context=" << context << " neural=" << neural << " ngram=" << mixed_width
+                      << '\n';
+        }
+    }
+    return 0;
+}
+
 } // namespace
 
-int main() {
+int main(int argc, char** argv) {
+    if (const int result = verify_wide_residual_precision(); result != 0) { return result; }
     const std::filesystem::path groupwise =
         artifact_path("NINFER_QWEN3_6_27B_WEIGHTS", "qwen3_6_27b.ninfer");
     const std::filesystem::path nvfp4 =
@@ -342,6 +435,45 @@ int main() {
         artifact_path("NINFER_QWEN3_8_27B_DFLASH2_WEIGHTS", "qwen3_8_27b.ninfer");
     const std::filesystem::path qwen38_nvfp4_dflash2 = artifact_path(
         "NINFER_QWEN3_8_27B_NVFP4_DFLASH2_WEIGHTS", "qwen3_8_27b_nvfp4.ninfer");
+    if (argc == 2) {
+        const std::string_view mode(argv[1]);
+        if (mode == "--planning") {
+            if (const int result = verify_vision_workspace_planning(); result != 0) {
+                return result;
+            }
+            if (const int result = verify_rejection(); result != 0) { return result; }
+            if (const int result = verify_ngram_graph_planning(); result != 0) { return result; }
+            return verify_profile_mismatch_rejection();
+        }
+
+        struct ArtifactCheck {
+            std::string_view option;
+            std::filesystem::path path;
+            WeightsProfile profile;
+            bool bundle;
+        };
+
+        const std::array checks{
+            ArtifactCheck{"--qwen38-old-groupwise", qwen38_groupwise,
+                          WeightsProfile::Qwen38GroupwiseInt, false},
+            ArtifactCheck{"--qwen38-old-nvfp4", qwen38_nvfp4, WeightsProfile::Qwen38Nvfp4, false},
+            ArtifactCheck{"--qwen38-groupwise-dflash2", qwen38_groupwise_dflash2,
+                          WeightsProfile::Qwen38GroupwiseInt, true},
+            ArtifactCheck{"--qwen38-nvfp4-dflash2", qwen38_nvfp4_dflash2,
+                          WeightsProfile::Qwen38Nvfp4, true}};
+        for (const auto& check : checks) {
+            if (mode != check.option) { continue; }
+            if (!std::filesystem::is_regular_file(check.path)) {
+                std::cerr << "skip: required artifact is absent: " << check.path << '\n';
+                return 77;
+            }
+            return check.bundle ? verify_dflash2_bundle(check.path, check.profile)
+                                : verify_legacy_dflash2_compatibility(check.path, check.profile);
+        }
+        std::cerr << "unknown independent load-plan check\n";
+        return 2;
+    }
+    if (argc != 1) { return 2; }
     if (!std::filesystem::is_regular_file(groupwise) || !std::filesystem::is_regular_file(nvfp4)) {
         std::cerr << "skip: both real 27B artifacts are required: groupwise=" << groupwise
                   << " nvfp4=" << nvfp4 << '\n';

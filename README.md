@@ -245,6 +245,7 @@ capacities remain fixed for the process lifetime.
 - [Documentation index](docs/README.md)
 - [CLI](docs/cli.md)
 - [HTTP serving](docs/serving.md)
+- [Ngram copy proposals](docs/ngram.md)
 - [Performance](docs/performance.md)
 - [Perplexity evaluation](docs/perplexity.md)
 - [Resource scheduling and context cache](docs/maintainer/resource-scheduling-and-context-cache.md)

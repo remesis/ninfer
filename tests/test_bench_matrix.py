@@ -1,16 +1,18 @@
 from __future__ import annotations
 
 import json
+import pytest
 
-from tools.bench.run_ninfer_bench_matrix import BenchCase, report_rows
+from tools.bench.run_ninfer_bench_matrix import BenchCase, load_bench_report, report_rows
 
 
-def test_schema_v14_report_is_flattened_for_matrix_summary(tmp_path) -> None:
+@pytest.mark.parametrize("ngram_enabled", [False, True])
+def test_schema_v15_report_is_flattened_for_matrix_summary(tmp_path, ngram_enabled) -> None:
     report_path = tmp_path / "report.json"
     report_path.write_text(
         json.dumps(
             {
-                "schema_version": 14,
+                "schema_version": 15,
                 "artifact_type": "ninfer_bench_report",
                 "tool": "ninfer_bench",
                 "artifact": {"path": "model.ninfer"},
@@ -42,9 +44,11 @@ def test_schema_v14_report_is_flattened_for_matrix_summary(tmp_path) -> None:
                     "kv_cache": "int8-group64",
                     "speculative_backend": "mtp",
                     "draft_tokens": 5,
+                    "ngram_draft_tokens": 31 if ngram_enabled else 0,
+                    "ngram_min_match": 12,
                     "proposal_head": "optimized",
                     "decode_path": "cuda-graph",
-                    "decode_graph_prime": {"primed": True, "output_tokens": 13},
+                    "decode_graph_prime": {"primed": True, "output_tokens": 65 if ngram_enabled else 13},
                     "repetitions": 2,
                     "warmup": 1,
                 },
@@ -66,6 +70,9 @@ def test_schema_v14_report_is_flattened_for_matrix_summary(tmp_path) -> None:
                             "rounds": 1,
                             "drafted_tokens": 5,
                             "accepted_tokens": 5,
+                            "ngram_rounds": 1 if ngram_enabled else 0,
+                            "ngram_drafted_tokens": 5 if ngram_enabled else 0,
+                            "ngram_accepted_tokens": 5 if ngram_enabled else 0,
                             "fallback_steps": 3,
                             "accepted_per_position": [1, 1, 1, 1, 1],
                         },
@@ -100,7 +107,11 @@ def test_schema_v14_report_is_flattened_for_matrix_summary(tmp_path) -> None:
         True,
     )
     assert (row["speculative_backend"], row["draft_tokens"]) == ("mtp", 5)
-    assert row["decode_graph_prime_output_tokens"] == 13
+    assert (row["ngram_draft_tokens"], row["ngram_min_match"]) == (31 if ngram_enabled else 0, 12)
+    assert (row["ngram_rounds"], row["ngram_drafted_tokens"], row["ngram_accepted_tokens"]) == (
+        (1, 5, 5) if ngram_enabled else (0, 0, 0)
+    )
+    assert row["decode_graph_prime_output_tokens"] == (65 if ngram_enabled else 13)
     assert row["kv_capacity"] == 8192
     assert row["host_to_device_bytes"] == 17_400_000_000
     assert row["workspace_capacity_bytes"] == 100_000_000
@@ -113,3 +124,13 @@ def test_schema_v14_report_is_flattened_for_matrix_summary(tmp_path) -> None:
     assert row["decode_engine_tok_s_mean"] == 7.5
     assert row["spec_fallback_steps"] == 3
     assert row["spec_accepted_per_position"] == "[1,1,1,1,1]"
+
+
+@pytest.mark.parametrize("version", [14, 16])
+def test_matrix_rejects_different_report_schema(tmp_path, version) -> None:
+    report_path = tmp_path / "report.json"
+    report_path.write_text(json.dumps({"schema_version": version,
+                                       "artifact_type": "ninfer_bench_report",
+                                       "tool": "ninfer_bench"}), encoding="utf-8")
+    with pytest.raises(ValueError, match="unsupported benchmark report identity"):
+        load_bench_report(report_path)

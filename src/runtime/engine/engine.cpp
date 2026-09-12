@@ -40,6 +40,13 @@ EngineOptions normalize_engine_options(EngineOptions options) {
     if (options.max_concurrency == 0 || options.max_concurrency > kMaximumConcurrency) {
         throw std::invalid_argument("Engine max_concurrency must be in [1,8]");
     }
+    if (options.speculative.ngram_archive_bytes != 0 &&
+        (options.speculative.ngram_draft_tokens == 0 || options.max_concurrency != 1 ||
+         options.speculative.ngram_session_bytes < (1ULL << 20) ||
+         options.speculative.ngram_session_bytes > options.speculative.ngram_archive_bytes)) {
+        throw std::invalid_argument("ngram archive requires C1 ngram drafting and session capacity "
+                                    "between 1 MiB and total archive capacity");
+    }
 
     ContextCacheOptions& cache      = options.context_cache;
     const std::uint32_t concurrency = options.max_concurrency;
@@ -110,6 +117,7 @@ runtime::ResolvedRequestOptions resolve_request_options(const ModelSamplingDefau
     resolved.execution.thinking                = options.execution.thinking;
     resolved.stop                              = std::move(options.stop);
     resolved.output                            = options.output;
+    resolved.ngram_session                     = std::move(options.ngram_session);
     return resolved;
 }
 

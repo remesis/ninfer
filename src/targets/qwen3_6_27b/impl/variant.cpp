@@ -124,6 +124,14 @@ std::vector<GraphExecutionProfile> Variant::ordinary_graph_profiles(std::uint32_
 std::vector<GraphExecutionProfile> Variant::mtp_graph_profiles(std::uint32_t capacity,
                                                                std::uint32_t draft_window) {
     if (draft_window == 0 || capacity == 0) { return {}; }
+    if (draft_window > kMaximumMtpDraftTokens) {
+        auto profiles = graph_profiles_through(capacity - 1, {96, 511, 2047, 8191, 32767});
+        // Wide copy alignment differs from the original K1..5 launch topology.
+        for (std::size_t i = 0; i < profiles.size(); ++i) {
+            profiles[i].topology_class = static_cast<std::uint32_t>(i);
+        }
+        return profiles;
+    }
     // Bound the final AR window E+2K at split-policy transitions until the grid reaches its cap.
     std::vector<std::uint32_t> ends;
     const auto add_shifted = [&](std::uint32_t visible_end, std::uint32_t offset) {
@@ -152,7 +160,7 @@ std::vector<GraphExecutionProfile> Variant::mtp_graph_profiles(std::uint32_t cap
 
 std::vector<GraphExecutionProfile>
 Variant::dflash_graph_profiles(std::uint32_t capacity, std::uint32_t draft_window, std::uint32_t) {
-    if (capacity == 0 || draft_window == 0 || draft_window > maximum_dflash_draft_tokens) {
+    if (capacity == 0 || draft_window == 0 || draft_window > qwen3_6::kDFlashVerifyMaximumDrafts) {
         throw std::invalid_argument("invalid DFlash2 graph dimensions");
     }
     // Bounded attention envelopes; each tier owns its topology and can change kernel decomposition.
@@ -161,6 +169,19 @@ Variant::dflash_graph_profiles(std::uint32_t capacity, std::uint32_t draft_windo
         profiles[i].topology_class = static_cast<std::uint32_t>(i);
     }
     return profiles;
+}
+
+ops::LinearPolicy Variant::residual_projection_policy(const Weight& weight,
+                                                      qwen3_6::TextPhase phase,
+                                                      std::int32_t columns,
+                                                      std::int32_t sequence_batch) {
+    // Preserve the neural verify path's FP8 residual activation precision.
+    // A flattened multi-request batch is not a wide single-request window.
+    if (weight.qtype == QType::FP8_E4M3FN_ROW_BF16S && phase == qwen3_6::TextPhase::Verify &&
+        sequence_batch == 1 && columns > 16 && columns <= 64) {
+        return ops::LinearPolicy::A16Only;
+    }
+    return text_policy(weight);
 }
 
 void Variant::attention_projection(const Tensor& hidden,
@@ -178,9 +199,12 @@ void Variant::attention_projection(const Tensor& hidden,
 }
 
 void Variant::attention_output_projection(const Tensor& attention, const Weight& weight,
-                                          Tensor& residual, qwen3_6::TextPhase,
-                                          WorkspaceArena& workspace, cudaStream_t stream) {
-    ops::linear_add(attention, weight, residual, text_policy(weight), workspace, stream);
+                                          Tensor& residual, qwen3_6::TextPhase phase,
+                                          std::int32_t sequence_batch, WorkspaceArena& workspace,
+                                          cudaStream_t stream) {
+    ops::linear_add(attention, weight, residual,
+                    residual_projection_policy(weight, phase, attention.ne[1], sequence_batch),
+                    workspace, stream);
 }
 
 void Variant::mtp_attention_projection(const Tensor& hidden,
@@ -277,9 +301,11 @@ void Variant::gdn_input_projection_record(const Tensor& hidden, const GdnProject
 }
 
 void Variant::gdn_output_projection(const Tensor& hidden, const Weight& weight, Tensor& residual,
-                                    qwen3_6::TextPhase, WorkspaceArena& workspace,
-                                    cudaStream_t stream) {
-    ops::linear_add(hidden, weight, residual, text_policy(weight), workspace, stream);
+                                    qwen3_6::TextPhase phase, std::int32_t sequence_batch,
+                                    WorkspaceArena& workspace, cudaStream_t stream) {
+    ops::linear_add(hidden, weight, residual,
+                    residual_projection_policy(weight, phase, hidden.ne[1], sequence_batch),
+                    workspace, stream);
 }
 
 void Variant::gdn_norm_control_projection(const Tensor& residual, const Tensor& norm_weight,
@@ -301,14 +327,17 @@ void Variant::gdn_norm_control_projection(const Tensor& residual, const Tensor& 
 }
 
 void Variant::post_mixer(const Tensor& hidden, const PostMixerWeights& weights, Tensor& residual,
-                         qwen3_6::TextPhase, const ::ninfer::ops::SparseMoeHints&,
-                         WorkspaceArena& workspace, cudaStream_t stream) {
+                         qwen3_6::TextPhase phase, std::int32_t sequence_batch,
+                         const ::ninfer::ops::SparseMoeHints&, WorkspaceArena& workspace,
+                         cudaStream_t stream) {
     auto scope        = workspace.scope();
     Tensor activation = workspace.alloc(DType::BF16, {TextConfig::intermediate, hidden.ne[1]});
     ops::linear_swiglu(hidden, weights.gate_up, activation, text_policy(weights.gate_up), workspace,
                        stream);
-    ops::linear_add(activation, weights.down, residual, text_policy(weights.down), workspace,
-                    stream);
+    ops::linear_add(
+        activation, weights.down, residual,
+        residual_projection_policy(weights.down, phase, activation.ne[1], sequence_batch),
+        workspace, stream);
 }
 
 void Variant::mtp_post_mixer(const Tensor& hidden, const MtpPostMixerWeights& weights,

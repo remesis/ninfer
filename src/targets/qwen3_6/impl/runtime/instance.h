@@ -64,8 +64,17 @@ inline std::vector<GraphExecutionProfile> ordinary_graph_profiles(std::uint32_t 
 }
 
 inline std::vector<GraphExecutionProfile> mtp_graph_profiles(std::uint32_t capacity,
-                                                             std::uint32_t draft_window) {
-    return Variant::mtp_graph_profiles(capacity, draft_window);
+                                                             std::uint32_t draft_window,
+                                                             std::uint32_t neural_draft_window) {
+    auto profiles = Variant::mtp_graph_profiles(capacity, draft_window);
+    if (draft_window != neural_draft_window) {
+        // Mixed verify/next-draft widths cannot use the stock equal-width aliases.
+        // Planning and capture must count the same separately instantiated graphs.
+        for (std::size_t i = 0; i < profiles.size(); ++i) {
+            profiles[i].topology_class = static_cast<std::uint32_t>(i);
+        }
+    }
+    return profiles;
 }
 
 inline std::vector<GraphExecutionProfile> dflash_graph_profiles(std::uint32_t capacity,
