@@ -165,6 +165,69 @@ void snapshot_readers() {
             "reader release resurrected cleared source");
 }
 
+void overlapping_clear() {
+    const auto source = text(4096, 1000);
+    for (int iteration = 0; iteration < 16; ++iteration) {
+        NgramArchive archive;
+        require(archive.publish(begin(archive, "overlap", source)), "overlap source seed");
+        auto request  = archive.begin("overlap", {});
+        auto snapshot = request->snapshot();
+        request.reset();
+        std::atomic<unsigned> started{0};
+        std::atomic<bool> cleared{false}, correct{true};
+        std::vector<std::jthread> readers;
+        for (int index = 0; index < 4; ++index) {
+            readers.emplace_back([&, pinned = snapshot] {
+                if (!copied(*pinned, source)) { correct = false; }
+                ++started;
+                while (!cleared.load()) {
+                    const auto match = pinned->propose(std::span(source).first(64), 63);
+                    // A lookup racing revocation may complete its immutable read or miss.
+                    if (!match.tokens.empty() &&
+                        (match.tokens.size() != 63 || !match.archived ||
+                         !std::equal(match.tokens.begin(), match.tokens.end(), source.begin() + 64))) {
+                        correct = false;
+                    }
+                }
+                if (pinned->valid() || copied(*pinned, source)) { correct = false; }
+            });
+        }
+        while (started.load() != 4) { std::this_thread::yield(); }
+        archive.clear("overlap");
+        snapshot.reset();
+        cleared = true;
+        readers.clear();
+        require(correct, "lookup overlapping clear or last-reader release failed");
+        auto fresh = archive.begin("overlap", {});
+        require(fresh && fresh->snapshot()->source_count() == 0,
+                "overlapping readers resurrected cleared sources");
+    }
+}
+
+void maximal_live_match() {
+    using detail::NgramProposer;
+    for (std::uint32_t history = 4; history <= 64; history += 4) {
+        for (std::uint32_t maximum = 3; maximum <= 65; ++maximum) {
+            NgramMatch live{std::vector<TokenId>(maximum, 1), history};
+            require(NgramProposer::maximal(live, history, maximum), "full live match not maximal");
+            for (std::uint32_t matched = 0; matched <= history; ++matched) {
+                for (std::uint32_t count = 0; count <= maximum; ++count) {
+                    require(!(matched > live.matched ||
+                              (matched == live.matched && count > live.tokens.size())),
+                            "archive could improve a skipped live match");
+                }
+            }
+            --live.matched;
+            require(!NgramProposer::maximal(live, history, maximum),
+                    "full draft hid a longer archive match");
+            ++live.matched;
+            live.tokens.pop_back();
+            require(!NgramProposer::maximal(live, history, maximum),
+                    "short draft hid a longer archive continuation");
+        }
+    }
+}
+
 void token_boundaries() {
     NgramArchive archive;
     auto source = text(512, 100);
@@ -309,6 +372,8 @@ int main() {
         compaction_and_dedup();
         owner_lifetime();
         snapshot_readers();
+        overlapping_clear();
+        maximal_live_match();
         token_boundaries();
         pressure();
         cursor_handoff();

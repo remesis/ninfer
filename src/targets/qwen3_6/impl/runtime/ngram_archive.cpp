@@ -44,7 +44,9 @@ struct Charge {
     }
 
     static bool fits(const std::shared_ptr<Budget>& budget, std::size_t bytes) {
-        return !budget || bytes <= budget->capacity - budget->used.load();
+        if (!budget) { return true; }
+        const auto used = budget->used.load();
+        return used <= budget->capacity && bytes <= budget->capacity - used;
     }
 
     static std::optional<Charge> acquire(std::shared_ptr<Budget> global,

@@ -11923,7 +11923,9 @@ NgramProposer::Match ProgramImplCore::propose_ngram(std::span<const std::uint32_
     }
     if (match.tokens.size() < maximum + 2U) {
         match = request.ngram->propose(history, maximum + 2U, ngram_min_match);
-        if (request.ngram_snapshot) {
+        // Equal candidates keep the live source; a maximal match cannot be improved.
+        if (request.ngram_snapshot &&
+            !NgramProposer::maximal(match, history.size(), maximum + 2U)) {
             auto retained = request.ngram_snapshot->propose(history, maximum + 2U, ngram_min_match);
             if (retained.matched > match.matched ||
                 (retained.matched == match.matched &&

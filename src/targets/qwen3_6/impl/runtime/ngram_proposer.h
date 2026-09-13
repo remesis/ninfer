@@ -21,6 +21,11 @@ public:
 
     using Match = NgramMatch;
 
+    [[nodiscard]] static bool maximal(const Match& match, std::size_t history_size,
+                                      std::uint32_t maximum) {
+        return match.matched == history_size && match.tokens.size() == maximum;
+    }
+
     explicit NgramProposer(std::size_t token_capacity = 1U << 20,
                            std::size_t bucket_count   = 1U << 19)
         : tokens_(token_capacity, -1), buckets_(bucket_count) {
